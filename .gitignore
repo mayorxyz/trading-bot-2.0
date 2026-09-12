@@ -1,11 +1,5 @@
-```
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-```node_modules/
+(src/tbb/data/fetcher.py is a source file, so no need to ignore it)node_modules/
 .next/
 dist/
 build/
 *.log
-node_modules/

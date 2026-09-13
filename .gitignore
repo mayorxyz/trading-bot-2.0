@@ -8,6 +8,11 @@ __pycache__/
 env/
 venv/
 .venv/
+.ENV
+.ENV.local
+.env
+.env.local
+.env.*
 pip-log.txt
 pip-delete-this-directory.txt
 .tox/
@@ -18,10 +23,10 @@ nosetests.xml
 coverage.xml
 *.cover
 *.log
+.git/modules/
 .DS_Store
 Thumbs.db
 ```node_modules/
 .next/
 dist/
 build/
-node_modules/

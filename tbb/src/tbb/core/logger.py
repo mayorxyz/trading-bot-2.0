@@ -149,3 +149,11 @@ def get_trade_logger() -> logging.Logger:
 def get_alert_logger() -> logging.Logger:
     """Get the alert logger."""
     return alert_logger
+
+
+# Alias for convenience - used by backtest and other modules
+def get_logger(name: str = "tbb.main") -> logging.Logger:
+    """Get a logger by name, or the main logger."""
+    if name == "tbb.main":
+        return main_logger
+    return setup_logger(name)

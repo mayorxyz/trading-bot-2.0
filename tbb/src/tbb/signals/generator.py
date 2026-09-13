@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 import polars as pl
 from tbb.core.config import settings
-from tbb.signals.schema import TradeSignal, SignalDirection
+from tbb.signals.output import TradeSignal
 
 class SignalGenerator:
     """
@@ -73,7 +73,7 @@ class SignalGenerator:
         
         return signal
     
-    def _determine_direction(self, last: pl.DataFrame) -> Optional[SignalDirection]:
+    def _determine_direction(self, last: pl.DataFrame) -> Optional[str]:
         """Determine trade direction from market structure signals."""
         is_high_sweep = last['is_high_sweep'][0] if 'is_high_sweep' in last.columns else False
         is_low_sweep = last['is_low_sweep'][0] if 'is_low_sweep' in last.columns else False
@@ -81,16 +81,16 @@ class SignalGenerator:
         is_bearish_bos = last['is_bearish_bos'][0] if 'is_bearish_bos' in last.columns else False
         
         if is_high_sweep or is_bullish_bos:
-            return SignalDirection.LONG
+            return "LONG"
         elif is_low_sweep or is_bearish_bos:
-            return SignalDirection.SHORT
+            return "SHORT"
         
         return None
     
-    def _calculate_entry(self, last: pl.DataFrame, direction: SignalDirection) -> Optional[float]:
+    def _calculate_entry(self, last: pl.DataFrame, direction: str) -> Optional[float]:
         """Calculate entry price: FVG CE priority, then OB midpoint."""
         
-        if direction == SignalDirection.LONG:
+        if direction == "LONG":
             # Priority 1: Bullish FVG CE
             if 'is_bullish_fvg_active' in last.columns and last['is_bullish_fvg_active'][0]:
                 ce = last['bullish_fvg_ce'][0] if 'bullish_fvg_ce' in last.columns else None
@@ -120,13 +120,13 @@ class SignalGenerator:
         
         return None
     
-    def _calculate_stop(self, last: pl.DataFrame, direction: SignalDirection, entry: float) -> Optional[float]:
+    def _calculate_stop(self, last: pl.DataFrame, direction: str, entry: float) -> Optional[float]:
         """Calculate stop loss beyond structural level + 0.1*ATR buffer."""
         
         atr = last['atr_14'][0] if 'atr_14' in last.columns else 0
         buffer = 0.1 * atr if atr > 0 else entry * 0.001  # Fallback 0.1% if no ATR
         
-        if direction == SignalDirection.LONG:
+        if direction == "LONG":
             # Find recent Swing Low or Sweep Low
             swing_low = last['swing_low_price'][0] if 'swing_low_price' in last.columns else None
             sweep_low = last['low'][0] if ('is_low_sweep' in last.columns and last['is_low_sweep'][0]) else None
@@ -164,10 +164,10 @@ class SignalGenerator:
             # Stop must be ABOVE structural level (for shorts)
             return structural_level + buffer
     
-    def _calculate_take_profits(self, entry: float, risk: float, direction: SignalDirection) -> tuple:
+    def _calculate_take_profits(self, entry: float, risk: float, direction: str) -> tuple:
         """Calculate TP1 (1.0R) and TP2 (2.5R)."""
         
-        if direction == SignalDirection.LONG:
+        if direction == "LONG":
             tp1 = entry + (1.0 * risk)
             tp2 = entry + (2.5 * risk)
         else:  # SHORT

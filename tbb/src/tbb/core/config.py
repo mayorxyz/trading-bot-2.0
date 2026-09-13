@@ -70,7 +70,9 @@ class Settings(BaseSettings):
     MIN_RISK_REWARD: float = Field(default=1.5, description="Minimum R:R ratio to enter (1.5)")
     FRESH_FVG_MAX_AGE_BARS_1H: int = Field(default=72, description="Max age for FVG on 1H (72 bars)")
     FRESH_FVG_MAX_AGE_BARS_15M: int = Field(default=48, description="Max age for FVG on 15m (48 bars)")
-    MAX_OB_TOUCHES: int = Field(default=3, description="Max touches before OB invalidated")
+    
+    # === Market Structure Parameters ===
+    FRACTAL_STRENGTH: int = Field(default=2, description="Fractal strength for swing detection (2=5-bar, 1=3-bar)")
     
     # === EXECUTION MODE ===
     AUTO_EXECUTE: bool = Field(

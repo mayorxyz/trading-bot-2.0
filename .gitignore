@@ -47,3 +47,4 @@ ENV/
 .env.local
 *.env.*node_modules/
 .next/
+node_modules/

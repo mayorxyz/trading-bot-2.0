@@ -72,6 +72,12 @@ class Settings(BaseSettings):
     FRESH_FVG_MAX_AGE_BARS_15M: int = Field(default=48, description="Max age for FVG on 15m (48 bars)")
     MAX_OB_TOUCHES: int = Field(default=3, description="Max touches before OB invalidated")
     
+    # === EXECUTION MODE ===
+    AUTO_EXECUTE: bool = Field(
+        default=False,
+        description="If True, bot auto-places orders on valid signals. If False, signals only."
+    )
+    
     # === Performance Monitoring ===
     METRICS_ROLLING_WINDOW: int = Field(default=100, description="Rolling window for metrics (100 trades)")
     SHARPE_WINDOW_DAYS: int = Field(default=60, description="Sharpe ratio calculation window (60 days)")

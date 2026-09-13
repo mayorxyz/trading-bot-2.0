@@ -1,6 +1,23 @@
-(src/tbb/data/fetcher.py is a source file, so no need to ignore it)node_modules/
-.next/
-dist/
+```
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment
+.env
+.env.local
+*.env.*
+
+# Dependencies
+venv/
+.venv/
+.env/
+
+# Build artifacts
 build/
+dist/
+```node_modules/
+.next/
 *.log
-node_modules/

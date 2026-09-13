@@ -77,6 +77,34 @@ class Settings(BaseSettings):
         default=False,
         description="If True, bot auto-places orders on valid signals. If False, signals only."
     )
+    IS_TESTNET: bool = Field(
+        default=True,
+        description="If True, use exchange testnet endpoints. If False, use mainnet."
+    )
+    EXECUTION_MODE: str = Field(
+        default="paper",  # "paper" | "live"
+        description="If 'paper', log intended API calls without sending. If 'live', send real orders."
+    )
+    KILL_SWITCH: bool = Field(
+        default=False,
+        description="If True, cancel all open orders and flatten positions immediately."
+    )
+    
+    # === POSITION LIMITS ===
+    MAX_OPEN_POSITIONS: int = Field(
+        default=4,
+        description="Maximum concurrent open positions"
+    )
+    MAX_DAILY_LOSS_PCT: float = Field(
+        default=0.03,
+        description="Maximum daily loss percentage (3%) before blocking new entries"
+    )
+    
+    # === RISK PER TRADE ===
+    RISK_PER_TRADE_PCT: float = Field(
+        default=0.01,
+        description="Risk per trade as % of account equity (1%)"
+    )
     
     # === PAPER TRACKING CONFIG ===
     MOVE_SL_TO_BE_ON_TP1: bool = Field(

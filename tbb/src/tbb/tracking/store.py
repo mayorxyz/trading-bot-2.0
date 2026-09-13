@@ -106,6 +106,12 @@ class TrackedSignal(SQLModel, table=True):
     tp1_hit_at: Optional[datetime] = None
     position_remaining_pct: float = Field(default=1.0)  # 1.0 = full, 0.5 = half after TP1
     
+    # === Exchange Order IDs (for lifecycle sync) ===
+    exchange_entry_order_id: Optional[str] = None
+    exchange_sl_order_id: Optional[str] = None
+    exchange_tp1_order_id: Optional[str] = None
+    exchange_tp2_order_id: Optional[str] = None
+    
     def calculate_pnl_r(self, exit_price: float) -> float:
         """Calculate PnL in R-multiples."""
         if self.direction == "LONG":

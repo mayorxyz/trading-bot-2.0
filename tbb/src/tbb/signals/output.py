@@ -196,7 +196,7 @@ class SignalOutputManager:
             self.active_signals[signal.signal_id] = signal
             self.signal_history.append(signal)
             
-            # Also persist to tracking database
+            # Also persist to tracking database with all advanced config
             tracked_signal = TrackedSignal(
                 signal_id=signal.signal_id,
                 symbol=signal.symbol,
@@ -217,6 +217,11 @@ class SignalOutputManager:
                 mvs_mss_confirmed=signal.mvs_mss_confirmed,
                 move_sl_to_be_on_tp1=getattr(settings, 'MOVE_SL_TO_BE_ON_TP1', False),
                 resolve_fully_at_tp1=getattr(settings, 'RESOLVE_FULLY_AT_TP1', False),
+                trail_after_tp1=getattr(settings, 'TRAIL_AFTER_TP1', True),
+                be_offset_r=getattr(settings, 'BE_OFFSET_R', 0.5),
+                trail_atr_multiplier=getattr(settings, 'TRAIL_ATR_MULTIPLIER', 3.0),
+                mae_hard_exit_r=getattr(settings, 'MAE_HARD_EXIT_R', 1.0),
+                mae_stall_exit_r=getattr(settings, 'MAE_STALL_EXIT_R', 0.7),
             )
             await tracking_store.save_signal(tracked_signal)
             
@@ -352,6 +357,30 @@ class SignalOutputManager:
 signal_output_manager = SignalOutputManager()
 
 
+def get_dynamic_signal_expiry_hours(timeframe: str) -> int:
+    """Get dynamic expiry hours based on signal timeframe (2024-2026 research)."""
+    timeframe_lower = timeframe.lower().strip()
+    
+    # Exact match for 1m-5m (avoid matching '5m' in '15m')
+    if timeframe_lower in ['1m', '2m', '3m', '4m', '5m']:
+        return settings.SIGNAL_EXPIRY_1M_5M_HOURS
+    
+    # 15m to 1H signals: 24 hours
+    if timeframe_lower in ['15m', '30m', '1h', '1H']:
+        return settings.SIGNAL_EXPIRY_15M_1H_HOURS
+    
+    # 4H signals: 48 hours
+    if timeframe_lower in ['4h', '4H']:
+        return settings.SIGNAL_EXPIRY_4H_HOURS
+    
+    # Daily signals: 7 days (168 hours)
+    if timeframe_lower in ['1d', 'daily', '1D', 'Daily']:
+        return settings.SIGNAL_EXPIRY_DAILY_HOURS
+    
+    # Default to 24 hours
+    return 24
+
+
 async def publish_trade_signal(
     symbol: str,
     direction: str,
@@ -375,10 +404,21 @@ async def publish_trade_signal(
     auto_execute: bool = False,
     position_size: Optional[float] = None,
     notes: Optional[List[str]] = None,
+    timeframe_entry: str = "15m",
 ) -> TradeSignal:
-    """Convenience function to create and publish a trade signal."""
+    """
+    Convenience function to create and publish a trade signal.
+    
+    Implements DYNAMIC EXPIRY based on timeframe:
+    - 1m-5m: 4 hours
+    - 15m-1H: 24 hours  
+    - 4H: 48 hours
+    - Daily: 7 days
+    """
     now = datetime.now(timezone.utc)
-    hours_until_expiry = max_age_bars
+    
+    # Get dynamic expiry based on timeframe
+    hours_until_expiry = get_dynamic_signal_expiry_hours(timeframe_entry)
     expiry_time = datetime.fromtimestamp(
         now.timestamp() + (hours_until_expiry * 3600),
         tz=timezone.utc
@@ -410,6 +450,7 @@ async def publish_trade_signal(
         auto_execute=auto_execute,
         position_size=position_size,
         notes=notes or [],
+        timeframe_entry=timeframe_entry,
     )
     
     await signal_output_manager.publish_signal(signal)

@@ -4,11 +4,9 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
-
-# Dependencies
-.venv/
+.Python
 venv/
-env/
+.venv/
 .env
 .env.local
 .env.*
@@ -16,14 +14,15 @@ env/
 # Logs
 *.log
 
-# Editors
-.vscode/
-.idea/
+# Coverage
+.coverage
+coverage/
+htmlcov/
 
-# Build artifacts
-dist/
-build/
-target/
+# Testing
+.pytest_cache/
+.mypy_cache/
 ```node_modules/
 .next/
-node_modules/
+dist/
+build/

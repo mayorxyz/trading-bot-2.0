@@ -88,6 +88,38 @@ class Settings(BaseSettings):
         description="If True, fully resolve signal at TP1 (instead of partial)"
     )
     
+    # === ADVANCED TRADE MANAGEMENT (2024-2026 Research) ===
+    TRAIL_AFTER_TP1: bool = Field(
+        default=True,
+        description="If True, trail stop after TP1 hit (avoids BE wick-outs)"
+    )
+    BE_OFFSET_R: float = Field(
+        default=0.5,
+        description="Lock in +0.5R profit when trailing (avoids exact BE hunt zones)"
+    )
+    TRAIL_ATR_MULTIPLIER: float = Field(
+        default=3.0,
+        description="Trailing stop distance as multiple of ATR"
+    )
+    MAE_HARD_EXIT_R: float = Field(
+        default=1.0,
+        description="Early exit if MAE > this value and PnL < 0 (93-95% loss probability)"
+    )
+    MAE_STALL_EXIT_R: float = Field(
+        default=0.7,
+        description="Early exit if MAE > this and no +0.5R profit after 6 candles"
+    )
+    MAX_BARS_WITHOUT_PROFIT: int = Field(
+        default=6,
+        description="Max bars without +0.5R profit before stall exit"
+    )
+    
+    # === DYNAMIC EXPIRY BY TIMEFRAME ===
+    SIGNAL_EXPIRY_1M_5M_HOURS: int = Field(default=4, description="Expiry for 1m-5m signals")
+    SIGNAL_EXPIRY_15M_1H_HOURS: int = Field(default=24, description="Expiry for 15m-1H signals")
+    SIGNAL_EXPIRY_4H_HOURS: int = Field(default=48, description="Expiry for 4H signals")
+    SIGNAL_EXPIRY_DAILY_HOURS: int = Field(default=168, description="Expiry for Daily signals (7 days)")
+    
     # === Performance Monitoring ===
     METRICS_ROLLING_WINDOW: int = Field(default=100, description="Rolling window for metrics (100 trades)")
     SHARPE_WINDOW_DAYS: int = Field(default=60, description="Sharpe ratio calculation window (60 days)")

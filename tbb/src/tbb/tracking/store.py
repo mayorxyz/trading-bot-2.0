@@ -22,11 +22,15 @@ class TrackingStatus(str, Enum):
     PENDING = "pending"  # Signal published, waiting for fill
     ACTIVE = "active"  # Position filled, trade in progress
     HIT_TP1 = "hit_tp1"  # Hit first take profit (partial exit if configured)
-    WIN_TP2 = "win_tp2"  # Hit second take profit (full win)
+    WIN_TP2_HARD = "win_tp2_hard"  # Hit TP2 hard (full win at fixed target)
+    WIN_TP2_TRAILED = "win_tp2_trailed"  # Trailing stop hit on runner (partial win)
     LOSS_SL = "loss_sl"  # Hit stop loss
+    EARLY_EXIT_MAE = "early_exit_mae"  # Early exit due to high MAE
+    EARLY_EXIT_STALL = "early_exit_stall"  # Early exit due to stall (no profit after N bars)
     EXPIRED = "expired"  # Signal expired without fill
     INVALIDATED = "invalidated"  # Invalidated by opposite structure break
     CANCELLED = "cancelled"  # Manually cancelled
+    TIME_EXIT = "time_exit"  # Time-based exit (48h timeout)
 
 
 class TrackedSignal(SQLModel, table=True):
@@ -66,15 +70,25 @@ class TrackedSignal(SQLModel, table=True):
     exit_reason: Optional[str] = None
     pnl_r: Optional[float] = None
     pnl_pct: Optional[float] = None
+    partial_pnl_r: Optional[float] = None  # PnL from 50% closed at TP1
+    runner_pnl_r: Optional[float] = None   # PnL from remaining 50%
+    total_pnl_r: Optional[float] = None    # Combined PnL
     mae_r: Optional[float] = None
     mfe_r: Optional[float] = None
     resolved_at: Optional[datetime] = None
     time_to_fill_seconds: Optional[int] = None
     time_to_resolution_seconds: Optional[int] = None
+    time_to_tp1_seconds: Optional[int] = None
     
     # === Config at Signal Time ===
     move_sl_to_be_on_tp1: bool = Field(default=False)
     resolve_fully_at_tp1: bool = Field(default=False)
+    trail_after_tp1: bool = Field(default=True)
+    be_offset_r: float = Field(default=0.5)
+    trail_atr_multiplier: float = Field(default=3.0)
+    mae_hard_exit_r: float = Field(default=1.0)
+    mae_stall_exit_r: float = Field(default=0.7)
+    invalidation_reason: Optional[str] = None
     
     # === Price Monitoring ===
     highest_price_since_entry: Optional[float] = None
@@ -85,6 +99,12 @@ class TrackedSignal(SQLModel, table=True):
     # === Bars Monitoring ===
     bars_since_entry: int = Field(default=0)
     max_bars_for_resolution: int = Field(default=192)
+    bars_without_profit: int = Field(default=0)
+    
+    # === Trailing Stop State ===
+    trailing_stop_price: Optional[float] = None
+    tp1_hit_at: Optional[datetime] = None
+    position_remaining_pct: float = Field(default=1.0)  # 1.0 = full, 0.5 = half after TP1
     
     def calculate_pnl_r(self, exit_price: float) -> float:
         """Calculate PnL in R-multiples."""
@@ -131,6 +151,40 @@ class TrackedSignal(SQLModel, table=True):
                 self.highest_price_since_entry = current_high
                 if self.stop_loss != self.entry_price:
                     self.mae_r = (current_high - self.entry_price) / (self.stop_loss - self.entry_price)
+    
+    def calculate_trailing_stop(self, atr_14: Optional[float] = None, atr_multiplier: float = 3.0) -> float:
+        """Calculate trailing stop price based on ATR or fixed percentage."""
+        risk_amount = abs(self.entry_price - self.stop_loss)
+        
+        if self.direction == "LONG":
+            if atr_14 and self.highest_price_since_entry:
+                # Trail at highest_price - (ATR * multiplier)
+                trail_distance = atr_14 * atr_multiplier
+                return max(self.stop_loss, self.highest_price_since_entry - trail_distance)
+            else:
+                # Fallback: trail at +0.5R from entry
+                return self.entry_price + (risk_amount * self.be_offset_r)
+        else:  # SHORT
+            if atr_14 and self.lowest_price_since_entry:
+                trail_distance = atr_14 * atr_multiplier
+                return min(self.stop_loss, self.lowest_price_since_entry + trail_distance)
+            else:
+                return self.entry_price - (risk_amount * self.be_offset_r)
+    
+    def calculate_be_offset_stop(self) -> float:
+        """Calculate stop loss at +0.5R (avoids exact breakeven wick-outs)."""
+        risk_amount = abs(self.entry_price - self.stop_loss)
+        
+        if self.direction == "LONG":
+            return self.entry_price + (risk_amount * self.be_offset_r)
+        else:  # SHORT
+            return self.entry_price - (risk_amount * self.be_offset_r)
+    
+    def get_current_stop_loss(self) -> float:
+        """Get current active stop loss (may have been trailed)."""
+        if self.trailing_stop_price:
+            return self.trailing_stop_price
+        return self.stop_loss
 
 
 class SignalTrackingStore:
@@ -363,13 +417,20 @@ class SignalTrackingStore:
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
     ) -> Dict[str, Any]:
-        """Calculate tracking statistics for API endpoint."""
+        """Calculate tracking statistics for API endpoint with advanced metrics."""
         async with self._session_lock:
             with Session(self.engine) as session:
+                # Include all resolved statuses including early exits
                 query = select(TrackedSignal).where(
                     TrackedSignal.tracking_status.in_([
-                        TrackingStatus.WIN_TP2,
+                        TrackingStatus.WIN_TP2_HARD,
+                        TrackingStatus.WIN_TP2_TRAILED,
                         TrackingStatus.LOSS_SL,
+                        TrackingStatus.EARLY_EXIT_MAE,
+                        TrackingStatus.EARLY_EXIT_STALL,
+                        TrackingStatus.EXPIRED,
+                        TrackingStatus.INVALIDATED,
+                        TrackingStatus.TIME_EXIT,
                     ])
                 )
                 
@@ -400,27 +461,68 @@ class SignalTrackingStore:
                         "expectancy_r": None,
                         "avg_mae_r": None,
                         "avg_mfe_r": None,
+                        "mae_median_winners": None,
+                        "mfe_capture_rate": None,
+                        "early_exit_rate": None,
+                        "invalidation_rate": None,
                         "avg_time_to_fill_hours": None,
                         "avg_time_to_resolution_hours": None,
+                        "avg_time_to_tp1_hours": None,
                     }
                 
                 total_count = len(resolved_signals)
-                wins = [s for s in resolved_signals if s.pnl_r and s.pnl_r > 0]
-                losses = [s for s in resolved_signals if s.pnl_r and s.pnl_r <= 0]
+                
+                # Wins include TP2 hard, TP2 trailed, and any positive PnL exit
+                wins = [s for s in resolved_signals if s.total_pnl_r and s.total_pnl_r > 0]
+                if not wins:  # Fallback to pnl_r if total_pnl_r not set
+                    wins = [s for s in resolved_signals if s.pnl_r and s.pnl_r > 0]
+                
+                losses = [s for s in resolved_signals if (s.total_pnl_r or s.pnl_r or 0) <= 0]
                 
                 win_rate = len(wins) / total_count if total_count > 0 else None
                 
-                gross_profit = sum(s.pnl_r for s in wins if s.pnl_r)
-                gross_loss = abs(sum(s.pnl_r for s in losses if s.pnl_r))
+                # Use total_pnl_r if available, otherwise pnl_r
+                gross_profit = sum(s.total_pnl_r or s.pnl_r or 0 for s in wins)
+                gross_loss = abs(sum(s.total_pnl_r or s.pnl_r or 0 for s in losses))
                 profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
                 
-                expectancy_r = sum(s.pnl_r for s in resolved_signals if s.pnl_r) / total_count
+                expectancy_r = sum(s.total_pnl_r or s.pnl_r or 0 for s in resolved_signals) / total_count
                 
-                mae_signals = [s for s in resolved_signals if s.mae_r]
-                mfe_signals = [s for s in resolved_signals if s.mfe_r]
+                # MAE/MFE stats
+                mae_signals = [s for s in resolved_signals if s.mae_r is not None]
+                mfe_signals = [s for s in resolved_signals if s.mfe_r is not None]
                 avg_mae_r = sum(s.mae_r for s in mae_signals) / len(mae_signals) if mae_signals else None
                 avg_mfe_r = sum(s.mfe_r for s in mfe_signals) / len(mfe_signals) if mfe_signals else None
                 
+                # MAE median for winners
+                winner_mae_values = [s.mae_r for s in wins if s.mae_r is not None]
+                mae_median_winners = None
+                if winner_mae_values:
+                    sorted_mae = sorted(winner_mae_values)
+                    mid = len(sorted_mae) // 2
+                    mae_median_winners = sorted_mae[mid] if len(sorted_mae) % 2 else (sorted_mae[mid-1] + sorted_mae[mid]) / 2
+                
+                # MFE capture rate: Total PnL / MFE
+                mfe_capture_sum = 0.0
+                mfe_capture_count = 0
+                for s in resolved_signals:
+                    if s.mfe_r and s.mfe_r > 0 and (s.total_pnl_r or s.pnl_r or 0) > 0:
+                        capture = (s.total_pnl_r or s.pnl_r) / s.mfe_r
+                        mfe_capture_sum += capture
+                        mfe_capture_count += 1
+                mfe_capture_rate = mfe_capture_sum / mfe_capture_count if mfe_capture_count > 0 else None
+                
+                # Early exit rate
+                early_exits = [s for s in resolved_signals if s.tracking_status in [
+                    TrackingStatus.EARLY_EXIT_MAE, TrackingStatus.EARLY_EXIT_STALL
+                ]]
+                early_exit_rate = len(early_exits) / total_count if total_count > 0 else None
+                
+                # Invalidation rate
+                invalidations = [s for s in resolved_signals if s.tracking_status == TrackingStatus.INVALIDATED]
+                invalidation_rate = len(invalidations) / total_count if total_count > 0 else None
+                
+                # All signals for fill rate
                 all_signals_query = select(TrackedSignal)
                 if symbol:
                     all_signals_query = all_signals_query.where(TrackedSignal.symbol == symbol)
@@ -428,15 +530,20 @@ class SignalTrackingStore:
                 
                 filled_count = len([s for s in all_signals if s.tracking_status in [
                     TrackingStatus.ACTIVE, TrackingStatus.HIT_TP1, 
-                    TrackingStatus.WIN_TP2, TrackingStatus.LOSS_SL
+                    TrackingStatus.WIN_TP2_HARD, TrackingStatus.WIN_TP2_TRAILED,
+                    TrackingStatus.LOSS_SL, TrackingStatus.EARLY_EXIT_MAE,
+                    TrackingStatus.EARLY_EXIT_STALL,
                 ]])
                 fill_rate = filled_count / len(all_signals) if all_signals else None
                 
+                # Time metrics
                 fill_times = [s.time_to_fill_seconds for s in resolved_signals if s.time_to_fill_seconds]
                 resolution_times = [s.time_to_resolution_seconds for s in resolved_signals if s.time_to_resolution_seconds]
+                tp1_times = [s.time_to_tp1_seconds for s in resolved_signals if s.time_to_tp1_seconds]
                 
                 avg_time_to_fill = sum(fill_times) / len(fill_times) if fill_times else None
                 avg_time_to_resolution = sum(resolution_times) / len(resolution_times) if resolution_times else None
+                avg_time_to_tp1 = sum(tp1_times) / len(tp1_times) if tp1_times else None
                 
                 return {
                     "total_signals": total_count,
@@ -446,8 +553,13 @@ class SignalTrackingStore:
                     "expectancy_r": round(expectancy_r, 3) if expectancy_r else None,
                     "avg_mae_r": round(avg_mae_r, 3) if avg_mae_r else None,
                     "avg_mfe_r": round(avg_mfe_r, 3) if avg_mfe_r else None,
+                    "mae_median_winners": round(mae_median_winners, 3) if mae_median_winners else None,
+                    "mfe_capture_rate": round(mfe_capture_rate, 3) if mfe_capture_rate else None,
+                    "early_exit_rate": round(early_exit_rate, 3) if early_exit_rate else None,
+                    "invalidation_rate": round(invalidation_rate, 3) if invalidation_rate else None,
                     "avg_time_to_fill_hours": round(avg_time_to_fill / 3600, 2) if avg_time_to_fill else None,
                     "avg_time_to_resolution_hours": round(avg_time_to_resolution / 3600, 2) if avg_time_to_resolution else None,
+                    "avg_time_to_tp1_hours": round(avg_time_to_tp1 / 3600, 2) if avg_time_to_tp1 else None,
                 }
 
 

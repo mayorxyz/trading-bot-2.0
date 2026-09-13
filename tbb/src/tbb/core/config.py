@@ -74,6 +74,19 @@ class Settings(BaseSettings):
     # === Market Structure Parameters ===
     FRACTAL_STRENGTH: int = Field(default=2, description="Fractal strength for swing detection (2=5-bar, 1=3-bar)")
     
+    # FVG Settings
+    FVG_GAP_ATR_MULT: float = Field(default=0.5, description="FVG gap size must be >= 0.5 * ATR")
+    FVG_BODY_ATR_MULT: float = Field(default=0.5, description="FVG middle candle body must be >= 0.5 * ATR")
+    
+    # Sweep Settings
+    SWEEP_WICK_RATIO: float = Field(default=2.0, description="Wick must be 2x body for sweep")
+    
+    # BOS Settings
+    BOS_VOLUME_MULT: float = Field(default=1.5, description="Volume > 1.5x avg for BOS confirmation")
+    
+    # OB Settings
+    OB_SCAN_BACK: int = Field(default=25, description="Bars to scan back for Order Block")
+    
     # === EXECUTION MODE ===
     AUTO_EXECUTE: bool = Field(
         default=False,

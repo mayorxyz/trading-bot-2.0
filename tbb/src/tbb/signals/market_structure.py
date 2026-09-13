@@ -142,28 +142,240 @@ def detect_swings(df: pl.DataFrame, strength: int = None) -> pl.DataFrame:
 
 def calculate_market_structure(df: pl.DataFrame, config: dict = None) -> pl.DataFrame:
     """
-    Main entry point for market structure calculation.
-    Currently wraps swing detection; will be extended in Stage 2.
+    Master pipeline: Swings -> FVG -> BOS/Sweep -> OB
+    All parameters read from config dict or fallback to settings.
     
     Parameters
     ----------
     df : pl.DataFrame
-        OHLCV DataFrame
+        OHLCV DataFrame with columns: timestamp, open, high, low, close, volume
     config : dict, optional
-        Configuration overrides (not used yet, reserved for future stages)
-    
+        Configuration overrides for market structure parameters
+        
     Returns
     -------
     pl.DataFrame
-        DataFrame with market structure columns appended
+        DataFrame with all market structure columns appended:
+        - swing_high, swing_low, swing_high_price, swing_low_price
+        - is_bullish_fvg_active, bullish_fvg_ce, is_bearish_fvg_active, bearish_fvg_ce
+        - is_bullish_bos, is_bearish_bos, is_high_sweep, is_low_sweep
+        - bullish_ob_top, bullish_ob_bottom, bearish_ob_top, bearish_ob_bottom
     """
     if config is None:
         config = {}
     
-    strength = config.get('fractal_strength', getattr(settings, 'FRACTAL_STRENGTH', 2))
+    # Get Config Values
+    fractal_strength = config.get('fractal_strength', getattr(settings, 'FRACTAL_STRENGTH', 2))
+    fvg_gap_mult = config.get('fvg_gap_atr_mult', getattr(settings, 'FVG_GAP_ATR_MULT', 0.5))
+    fvg_body_mult = config.get('fvg_body_atr_mult', getattr(settings, 'FVG_BODY_ATR_MULT', 0.5))
+    sweep_ratio = config.get('sweep_wick_ratio', getattr(settings, 'SWEEP_WICK_RATIO', 2.0))
+    bos_vol_mult = config.get('bos_volume_mult', getattr(settings, 'BOS_VOLUME_MULT', 1.5))
+    ob_scan_back = config.get('ob_scan_back', getattr(settings, 'OB_SCAN_BACK', 25))
+
+    # 1. SWING DETECTION (Stage 1)
+    df = detect_swings(df, strength=fractal_strength)
     
-    df = detect_swings(df, strength=strength)
+    # 2. ATR Calculation (needed for FVG displacement filter)
+    # True Range = max(high-low, |high-prev_close|, |low-prev_close|)
+    prev_close = pl.col("close").shift(1)
+    tr = pl.max_horizontal(
+        pl.col("high") - pl.col("low"),
+        (pl.col("high") - prev_close).abs(),
+        (pl.col("low") - prev_close).abs()
+    )
+    df = df.with_columns(tr.rolling_mean(14).alias("atr_14"))
     
-    # TODO: Stage 2 will add FVG, BOS, Sweep, OB detection here
+    # 3. FVG DETECTION
+    # Bullish FVG: Low[i] > High[i-2]
+    # Bearish FVG: High[i] < Low[i-2]
+    df = df.with_columns([
+        (pl.col("low") > pl.col("high").shift(2)).alias("raw_bull_fvg"),
+        (pl.col("high") < pl.col("low").shift(2)).alias("raw_bear_fvg")
+    ])
+    
+    # Displacement Filter: Gap Size AND Body Size must exceed thresholds
+    # Gap size for bullish: Low[i] - High[i-2]
+    # Body size: |Close[i-1] - Open[i-1]| (middle candle of the 3-candle pattern)
+    gap_size_bull = pl.col("low") - pl.col("high").shift(2)
+    gap_size_bear = pl.col("high").shift(2) - pl.col("low")
+    body_size = (pl.col("close").shift(1) - pl.col("open").shift(1)).abs()
+    
+    df = df.with_columns([
+        # Bullish FVG with displacement filter
+        (
+            pl.col("raw_bull_fvg") & 
+            (gap_size_bull >= (fvg_gap_mult * pl.col("atr_14"))) & 
+            (body_size >= (fvg_body_mult * pl.col("atr_14")))
+        ).alias("is_bullish_fvg_active"),
+        
+        # Bearish FVG with displacement filter
+        (
+            pl.col("raw_bear_fvg") & 
+            (gap_size_bear >= (fvg_gap_mult * pl.col("atr_14"))) & 
+            (body_size >= (fvg_body_mult * pl.col("atr_14")))
+        ).alias("is_bearish_fvg_active")
+    ])
+    
+    # Calculate CE (Consequent Encroachment - 50% midpoint)
+    df = df.with_columns([
+        pl.when(pl.col("is_bullish_fvg_active"))
+          .then((pl.col("low") + pl.col("high").shift(2)) / 2)
+          .otherwise(None).cast(pl.Float64).alias("bullish_fvg_ce"),
+          
+        pl.when(pl.col("is_bearish_fvg_active"))
+          .then((pl.col("high").shift(2) + pl.col("low")) / 2)
+          .otherwise(None).cast(pl.Float64).alias("bearish_fvg_ce")
+    ])
+    
+    # Mitigation tracking via forward-fill state
+    # An FVG stays active until price trades through the CE
+    # We'll use a cumulative approach: mark "breach" events, then cumulative max to deactivate
+    
+    # For bullish: deactivated when Low <= CE
+    df = df.with_columns(
+        (pl.col("low") <= pl.col("bullish_fvg_ce")).alias("bullish_fvg_breach")
+    )
+    
+    # Forward-fill active status until breach occurs
+    # Use cum_sum of breaches to create groups, then keep only first in group
+    df = df.with_columns(
+        pl.col("bullish_fvg_breach").fill_null(0).cum_sum().alias("bull_breach_cumsum")
+    )
+    
+    # Reset active status after breach
+    df = df.with_columns(
+        pl.when(pl.col("bull_breach_cumsum") > 0)
+          .then(False)
+          .otherwise(pl.col("is_bullish_fvg_active"))
+          .alias("is_bullish_fvg_active")
+    )
+    
+    # Same for bearish
+    df = df.with_columns(
+        (pl.col("high") >= pl.col("bearish_fvg_ce")).alias("bearish_fvg_breach")
+    )
+    df = df.with_columns(
+        pl.col("bearish_fvg_breach").fill_null(0).cum_sum().alias("bear_breach_cumsum")
+    )
+    df = df.with_columns(
+        pl.when(pl.col("bear_breach_cumsum") > 0)
+          .then(False)
+          .otherwise(pl.col("is_bearish_fvg_active"))
+          .alias("is_bearish_fvg_active")
+    )
+    
+    # Clean up temp breach columns
+    df = df.drop(["raw_bull_fvg", "raw_bear_fvg", "bullish_fvg_breach", "bull_breach_cumsum", 
+                  "bearish_fvg_breach", "bear_breach_cumsum"])
+
+    # 4. BOS & SWEEP DETECTION
+    # Forward-fill the last confirmed swing price
+    df = df.with_columns([
+        pl.col("swing_high_price").fill_null(strategy="forward").alias("last_swing_high"),
+        pl.col("swing_low_price").fill_null(strategy="forward").alias("last_swing_low")
+    ])
+    
+    # Volume MA for BOS filter
+    df = df.with_columns(
+        pl.col("volume").rolling_mean(20).alias("vol_ma_20")
+    )
+    
+    # Sweep Detection: Wick beyond swing, Close back inside
+    # Long Sweep (Low Sweep): Low < last_swing_low, Close > last_swing_low
+    # Wick-to-body ratio filter: wick >= sweep_ratio * body
+    
+    lower_wick = pl.col("open").min(pl.col("close")) - pl.col("low")
+    upper_wick = pl.col("high") - pl.col("open").max(pl.col("close"))
+    body = (pl.col("close") - pl.col("open")).abs()
+    
+    df = df.with_columns([
+        # Low Sweep
+        (
+            (pl.col("low") < pl.col("last_swing_low")) & 
+            (pl.col("close") > pl.col("last_swing_low")) &
+            (lower_wick >= (sweep_ratio * body))
+        ).alias("is_low_sweep"),
+        
+        # High Sweep
+        (
+            (pl.col("high") > pl.col("last_swing_high")) & 
+            (pl.col("close") < pl.col("last_swing_high")) &
+            (upper_wick >= (sweep_ratio * body))
+        ).alias("is_high_sweep")
+    ])
+    
+    # BOS Detection: Close beyond swing
+    # Requires: Volume > threshold OR FVG created on BOS candle
+    df = df.with_columns([
+        # Bullish BOS
+        (
+            (pl.col("close") > pl.col("last_swing_high")) & 
+            ((pl.col("volume") > (bos_vol_mult * pl.col("vol_ma_20"))) | pl.col("is_bullish_fvg_active"))
+        ).alias("is_bullish_bos"),
+        
+        # Bearish BOS
+        (
+            (pl.col("close") < pl.col("last_swing_low")) & 
+            ((pl.col("volume") > (bos_vol_mult * pl.col("vol_ma_20"))) | pl.col("is_bearish_fvg_active"))
+        ).alias("is_bearish_bos")
+    ])
+
+    # 5. ORDER BLOCK DETECTION (Polars Native with Row Index)
+    # Add index to preserve original positions (fixes indexing bug)
+    df_with_idx = df.with_row_index("original_idx")
+    
+    # Initialize OB columns as lists
+    ob_bull_top = [None] * len(df)
+    ob_bull_bot = [None] * len(df)
+    ob_bear_top = [None] * len(df)
+    ob_bear_bot = [None] * len(df)
+    
+    # Filter for BOS events only (sparse iteration for performance)
+    bos_rows = df_with_idx.filter(
+        pl.col("is_bullish_bos") | pl.col("is_bearish_bos")
+    ).to_dicts()
+    
+    for row in bos_rows:
+        idx = row["original_idx"]
+        if idx < ob_scan_back:
+            continue  # Not enough history to scan back
+            
+        start_scan = idx - ob_scan_back
+        window_len = idx - start_scan
+        
+        # Slice window using Polars
+        window = df.slice(start_scan, window_len)
+        
+        if row["is_bullish_bos"] and row["is_bullish_fvg_active"]:
+            # Find last bearish candle (close < open) in window
+            bearish = window.filter(pl.col("close") < pl.col("open"))
+            if len(bearish) > 0:
+                last_candle = bearish.tail(1)
+                ob_bull_top[idx] = last_candle["high"][0]
+                ob_bull_bot[idx] = last_candle["low"][0]
+                
+        elif row["is_bearish_bos"] and row["is_bearish_fvg_active"]:
+            # Find last bullish candle (close > open) in window
+            bullish = window.filter(pl.col("close") > pl.col("open"))
+            if len(bullish) > 0:
+                last_candle = bullish.tail(1)
+                ob_bear_top[idx] = last_candle["high"][0]
+                ob_bear_bot[idx] = last_candle["low"][0]
+
+    # Add OB columns to dataframe
+    df = df.with_columns([
+        pl.Series(ob_bull_top, dtype=pl.Float64).alias("bullish_ob_top"),
+        pl.Series(ob_bull_bot, dtype=pl.Float64).alias("bullish_ob_bottom"),
+        pl.Series(ob_bear_top, dtype=pl.Float64).alias("bearish_ob_top"),
+        pl.Series(ob_bear_bot, dtype=pl.Float64).alias("bearish_ob_bottom")
+    ])
+    
+    # Cleanup temporary columns
+    cols_to_drop = ["atr_14", "vol_ma_20", "last_swing_high", "last_swing_low", 
+                    "original_idx"]
+    existing_cols = df.columns
+    drop_list = [c for c in cols_to_drop if c in existing_cols]
+    
+    df = df.drop(drop_list)
     
     return df

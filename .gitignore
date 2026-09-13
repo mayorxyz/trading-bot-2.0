@@ -5,45 +5,49 @@ __pycache__/
 *.pyo
 *.pyd
 .Python
-*.so
-*.egg-info/
-.eggs/
-
-# Testing
-.coverage
-coverage/
-htmlcov/
-.pytest_cache/
-.hypothesis/
-
-# Distribution / packaging
-dist/
-build/
-*.egg
-*.tar.gz
-*.whl
--pydantic/
-*.dist-info/
-
-# Environment
-.env
-.env.local
-.env.*
-.venv/
+env/
 venv/
-ENV/
+.venv/
+.venv.bak/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+*.pot
+*.po
+*~
+.pytest_cache/
+.mypy_cache/
+
+# Build artifacts
+build/
+dist/
+*.egg
+*.egg-info/
+MANIFEST
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
-*.tmp
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Logs
-*.log
+# Environment
+.env
+.env.local
+*.env.*
+
+# Testing
+htmlcov/
+.coverage*
 ```

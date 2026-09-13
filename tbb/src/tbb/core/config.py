@@ -66,11 +66,26 @@ class Settings(BaseSettings):
     SLIPPAGE_THRESHOLD: float = Field(default=0.30, description="Slippage threshold (30% worse than expected)")
     
     # === Signal Thresholds ===
-    MIN_CONFLUENCE_SCORE: float = Field(default=0.6, description="Minimum confluence score to enter (0.6)")
+    MIN_CONFLUENCE_SCORE: float = Field(default=0.40, description="Minimum confluence score to enter (0.40 for 0.70 max scale)")
     MIN_RISK_REWARD: float = Field(default=1.5, description="Minimum R:R ratio to enter (1.5)")
     FRESH_FVG_MAX_AGE_BARS_1H: int = Field(default=72, description="Max age for FVG on 1H (72 bars)")
     FRESH_FVG_MAX_AGE_BARS_15M: int = Field(default=48, description="Max age for FVG on 15m (48 bars)")
-    MAX_OB_TOUCHES: int = Field(default=3, description="Max touches before OB invalidated")
+    
+    # === Market Structure Parameters ===
+    FRACTAL_STRENGTH: int = Field(default=2, description="Fractal strength for swing detection (2=5-bar, 1=3-bar)")
+    
+    # FVG Settings
+    FVG_GAP_ATR_MULT: float = Field(default=0.5, description="FVG gap size must be >= 0.5 * ATR")
+    FVG_BODY_ATR_MULT: float = Field(default=0.5, description="FVG middle candle body must be >= 0.5 * ATR")
+    
+    # Sweep Settings
+    SWEEP_WICK_RATIO: float = Field(default=2.0, description="Wick must be 2x body for sweep")
+    
+    # BOS Settings
+    BOS_VOLUME_MULT: float = Field(default=1.5, description="Volume > 1.5x avg for BOS confirmation")
+    
+    # OB Settings
+    OB_SCAN_BACK: int = Field(default=25, description="Bars to scan back for Order Block")
     
     # === EXECUTION MODE ===
     AUTO_EXECUTE: bool = Field(

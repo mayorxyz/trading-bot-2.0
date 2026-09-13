@@ -21,3 +21,4 @@ dist/
 ```node_modules/
 .next/
 *.log
+node_modules/

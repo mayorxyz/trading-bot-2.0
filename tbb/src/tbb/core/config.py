@@ -78,6 +78,16 @@ class Settings(BaseSettings):
         description="If True, bot auto-places orders on valid signals. If False, signals only."
     )
     
+    # === PAPER TRACKING CONFIG ===
+    MOVE_SL_TO_BE_ON_TP1: bool = Field(
+        default=False,
+        description="If True, move stop loss to breakeven when TP1 is hit"
+    )
+    RESOLVE_FULLY_AT_TP1: bool = Field(
+        default=False,
+        description="If True, fully resolve signal at TP1 (instead of partial)"
+    )
+    
     # === Performance Monitoring ===
     METRICS_ROLLING_WINDOW: int = Field(default=100, description="Rolling window for metrics (100 trades)")
     SHARPE_WINDOW_DAYS: int = Field(default=60, description="Sharpe ratio calculation window (60 days)")

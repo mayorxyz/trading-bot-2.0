@@ -14,6 +14,7 @@ import uuid
 from tbb.core.config import settings
 from tbb.core.logger import setup_logger
 from tbb.monitoring.alerts import TelegramAlerter
+from tbb.tracking.store import tracking_store, TrackedSignal, TrackingStatus
 
 logger = setup_logger(__name__)
 
@@ -194,6 +195,30 @@ class SignalOutputManager:
             signal.bars_remaining = signal.max_age_bars
             self.active_signals[signal.signal_id] = signal
             self.signal_history.append(signal)
+            
+            # Also persist to tracking database
+            tracked_signal = TrackedSignal(
+                signal_id=signal.signal_id,
+                symbol=signal.symbol,
+                direction=signal.direction,
+                entry_price=signal.entry_price,
+                stop_loss=signal.stop_loss,
+                take_profit_1=signal.take_profit_1,
+                take_profit_2=signal.take_profit_2,
+                risk_reward=signal.risk_reward,
+                confluence_score=signal.confluence_score,
+                market_regime=signal.market_regime,
+                funding_rate=signal.funding_rate,
+                atr_14=signal.atr_14,
+                max_age_bars=signal.max_age_bars,
+                expiry_time=signal.expiry_time,
+                mvs_ob_present=signal.mvs_ob_present,
+                mvs_fvg_confirmed=signal.mvs_fvg_confirmed,
+                mvs_mss_confirmed=signal.mvs_mss_confirmed,
+                move_sl_to_be_on_tp1=getattr(settings, 'MOVE_SL_TO_BE_ON_TP1', False),
+                resolve_fully_at_tp1=getattr(settings, 'RESOLVE_FULLY_AT_TP1', False),
+            )
+            await tracking_store.save_signal(tracked_signal)
             
             logger.info(
                 f"Signal published: {signal.symbol} {signal.direction} | "

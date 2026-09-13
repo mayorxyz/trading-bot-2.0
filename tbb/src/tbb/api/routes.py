@@ -25,6 +25,8 @@ from tbb.signals.output import signal_output_manager, TradeSignal, SignalStatus
 from tbb.monitoring.metrics import LiveMetrics
 from tbb.risk.circuit_breaker import CircuitBreaker, CircuitBreakerResult
 from tbb.data.store import DataStore
+from tbb.tracking.store import tracking_store, TrackingStatus
+from tbb.tracking.resolver import signal_resolver
 
 logger = get_logger(__name__)
 
@@ -98,6 +100,34 @@ class PauseResponse(BaseModel):
     success: bool
     message: str
     circuit_breaker_status: str
+
+
+class TrackingStatsResponse(BaseModel):
+    total_signals: int
+    fill_rate: Optional[float]
+    win_rate: Optional[float]
+    profit_factor: Optional[float]
+    expectancy_r: Optional[float]
+    avg_mae_r: Optional[float]
+    avg_mfe_r: Optional[float]
+    avg_time_to_fill_hours: Optional[float]
+    avg_time_to_resolution_hours: Optional[float]
+
+
+class TrackedSignalResponse(BaseModel):
+    signal_id: str
+    symbol: str
+    direction: str
+    entry_price: float
+    stop_loss: float
+    take_profit_1: float
+    take_profit_2: float
+    tracking_status: str
+    pnl_r: Optional[float]
+    mae_r: Optional[float]
+    mfe_r: Optional[float]
+    exit_reason: Optional[str]
+    resolved_at: Optional[str]
 
 
 # === Helper Functions ===
@@ -292,4 +322,102 @@ async def resume_bot():
         success=True,
         message="Bot resumed successfully",
         circuit_breaker_status="ACTIVE",
+    )
+
+
+# === TRACKING ENDPOINTS ===
+
+@router.get("/tracking/stats", response_model=TrackingStatsResponse)
+async def get_tracking_stats(
+    symbol: Optional[str] = Query(None, description="Filter by symbol"),
+    regime: Optional[str] = Query(None, description="Filter by market regime"),
+    min_confluence_score: Optional[float] = Query(None, ge=0.0, le=1.0, description="Minimum confluence score filter"),
+):
+    """
+    Get paper tracking statistics including fill rate, win rate, profit factor, expectancy, MAE/MFE.
+    
+    Supports filtering by symbol, regime, and minimum confluence score.
+    """
+    stats = await tracking_store.get_tracking_stats(
+        symbol=symbol,
+        regime=regime,
+        min_confluence_score=min_confluence_score,
+    )
+    return TrackingStatsResponse(**stats)
+
+
+@router.get("/tracking/signals", response_model=List[TrackedSignalResponse])
+async def get_tracked_signals(
+    status: Optional[str] = Query(None, description="Filter by tracking status"),
+    symbol: Optional[str] = Query(None, description="Filter by symbol"),
+    limit: int = Query(50, ge=1, le=200, description="Number of signals to return"),
+    offset: int = Query(0, ge=0, description="Offset for pagination"),
+):
+    """
+    Get tracked signals with resolution status.
+    
+    Returns signals with their current tracking status (PENDING, ACTIVE, HIT_TP1, WIN_TP2, LOSS_SL, EXPIRED, INVALIDATED).
+    """
+    if status:
+        try:
+            target_status = TrackingStatus(status)
+            if target_status in [TrackingStatus.PENDING, TrackingStatus.ACTIVE, TrackingStatus.HIT_TP1]:
+                signals = await tracking_store.get_active_signals(symbol=symbol)
+                signals = [s for s in signals if s.tracking_status == target_status]
+            else:
+                signals = await tracking_store.get_resolved_signals(
+                    symbol=symbol,
+                    limit=limit,
+                    offset=offset,
+                )
+                signals = [s for s in signals if s.tracking_status == target_status]
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
+    else:
+        # Return all active signals
+        signals = await tracking_store.get_active_signals(symbol=symbol)
+    
+    return [
+        TrackedSignalResponse(
+            signal_id=s.signal_id,
+            symbol=s.symbol,
+            direction=s.direction,
+            entry_price=s.entry_price,
+            stop_loss=s.stop_loss,
+            take_profit_1=s.take_profit_1,
+            take_profit_2=s.take_profit_2,
+            tracking_status=s.tracking_status.value,
+            pnl_r=s.pnl_r,
+            mae_r=s.mae_r,
+            mfe_r=s.mfe_r,
+            exit_reason=s.exit_reason,
+            resolved_at=s.resolved_at.isoformat() if s.resolved_at else None,
+        )
+        for s in signals[:limit]
+    ]
+
+
+@router.get("/tracking/signal/{signal_id}", response_model=TrackedSignalResponse)
+async def get_tracked_signal_by_id(signal_id: str):
+    """
+    Get a specific tracked signal by ID with full resolution details.
+    """
+    signal = await tracking_store.get_signal_by_id(signal_id)
+    if not signal:
+        raise HTTPException(status_code=404, detail=f"Tracked signal {signal_id} not found")
+    
+    return TrackedSignalResponse(
+        signal_id=signal.signal_id,
+        symbol=signal.symbol,
+        direction=signal.direction,
+        entry_price=signal.entry_price,
+        stop_loss=signal.stop_loss,
+        take_profit_1=signal.take_profit_1,
+        take_profit_2=signal.take_profit_2,
+        tracking_status=signal.tracking_status.value,
+        pnl_r=signal.pnl_r,
+        mae_r=signal.mae_r,
+        mfe_r=signal.mfe_r,
+        exit_reason=signal.exit_reason,
+        resolved_at=signal.resolved_at.isoformat() if signal.resolved_at else None,
     )

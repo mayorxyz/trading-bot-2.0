@@ -20,6 +20,11 @@ DATA_DIR = BASE_DIR / "data"
 LIVE_STATE_DB = DATA_DIR / "live_state.db"      # Live candle state, indicators, regime
 TRADES_DB = DATA_DIR / "trades.db"              # Trade execution logs
 ANALYSIS_RUNS_DB = DATA_DIR / "analysis_runs.db"  # Backtest/analysis results
+TRACKING_DB = DATA_DIR / "tracking.db"          # Signal tracking and resolution
+
+def get_tracking_db_path() -> str:
+    """Get path to tracking database."""
+    return str(TRACKING_DB)
 
 # Log directory
 LOG_DIR = BASE_DIR / "logs"

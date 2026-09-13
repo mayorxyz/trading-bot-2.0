@@ -27,7 +27,7 @@ class TestSimulatedExchange:
     """Test conservative price-through fill logic."""
     
     def test_limit_long_fill_price_through(self):
-        """Long limit fills when bar.low < limit_price (strictly less)."""
+        """Long limit fills when bar.low <= limit_price - tick_size (deterministic)."""
         exchange = SimulatedExchange(seed=42)
         
         order = exchange.create_order(
@@ -38,12 +38,12 @@ class TestSimulatedExchange:
             quantity=1.0,
         )
         
-        # Bar trades through the limit
+        # Bar trades through the limit by more than 1 tick (0.5 for BTC)
         bar = BarData(
             timestamp=_now(),
             open=50100.0,
             high=50200.0,
-            low=49900.0,  # Below limit
+            low=49900.0,  # Well below limit (100 < 49999.5 threshold)
             close=50050.0,
             volume=1000.0,
         )
@@ -53,7 +53,7 @@ class TestSimulatedExchange:
         assert should_fill is True
         assert fill_price <= 50000.0  # Limit or better
     
-    def test_limit_long_no_fill_price_above(self):
+    def test_limit_long_no_fill_when_low_above_limit(self):
         """Long limit does NOT fill when bar.low > limit_price."""
         exchange = SimulatedExchange(seed=42)
         
@@ -80,10 +80,39 @@ class TestSimulatedExchange:
         assert should_fill is False
         assert fill_price is None
     
-    def test_limit_long_touch_probabilistic(self):
-        """Long limit with probabilistic fill on exact touch."""
-        # Use seed to make test deterministic
+    def test_limit_long_touch_probabilistic_fill(self):
+        """Long limit with probabilistic fill on exact touch (within 1 tick)."""
+        # Use probability=1.0 to make test deterministic
         exchange = SimulatedExchange(fill_probability_major=1.0, seed=42)
+        
+        order = exchange.create_order(
+            symbol="BTCUSDT",
+            side=OrderSide.LONG,
+            order_type=OrderType.LIMIT,
+            price=50000.0,
+            quantity=1.0,
+        )
+        
+        # Bar touches exactly at limit (within tick size)
+        bar = BarData(
+            timestamp=_now(),
+            open=50100.0,
+            high=50200.0,
+            low=50000.0,  # Exactly at limit - triggers probabilistic logic
+            close=50150.0,
+            volume=1000.0,
+        )
+        
+        should_fill, fill_price = exchange.check_limit_fill(order, bar)
+        
+        # With probability=1.0, should fill
+        assert should_fill is True
+        assert fill_price == 50000.0
+    
+    def test_limit_long_touch_probabilistic_no_fill(self):
+        """Long limit with probabilistic no-fill on touch when probability=0."""
+        # Use probability=0.0 to ensure no fill
+        exchange = SimulatedExchange(fill_probability_major=0.0, seed=42)
         
         order = exchange.create_order(
             symbol="BTCUSDT",
@@ -98,15 +127,43 @@ class TestSimulatedExchange:
             timestamp=_now(),
             open=50100.0,
             high=50200.0,
-            low=50000.0,  # Exactly at limit
+            low=50000.0,
             close=50150.0,
             volume=1000.0,
         )
         
         should_fill, fill_price = exchange.check_limit_fill(order, bar)
         
-        # With probability=1.0, should fill
+        # With probability=0.0, should NOT fill
+        assert should_fill is False
+        assert fill_price is None
+    
+    def test_limit_long_deterministic_fill_clear_through(self):
+        """Long limit deterministically fills when price clearly trades through."""
+        exchange = SimulatedExchange(seed=42)
+        
+        order = exchange.create_order(
+            symbol="BTCUSDT",
+            side=OrderSide.LONG,
+            order_type=OrderType.LIMIT,
+            price=50000.0,
+            quantity=1.0,
+        )
+        
+        # Bar low is well below limit (by more than tick_size=0.5)
+        bar = BarData(
+            timestamp=_now(),
+            open=50100.0,
+            high=50200.0,
+            low=49950.0,  # 50 below limit - definitely fills
+            close=50050.0,
+            volume=1000.0,
+        )
+        
+        should_fill, fill_price = exchange.check_limit_fill(order, bar)
+        
         assert should_fill is True
+        assert fill_price <= 50000.0
     
     def test_limit_short_fill_price_through(self):
         """Short limit fills when bar.high > limit_price (strictly greater)."""

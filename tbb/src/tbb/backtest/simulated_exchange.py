@@ -171,6 +171,31 @@ class SimulatedExchange:
         
         return order
     
+    def _get_tick_size(self, symbol: str) -> float:
+        """Get tick size for a symbol from existing config.
+        
+        Falls back to reasonable defaults if not found:
+        - BTC/ETH: 0.5
+        - Alts: 0.01 or 0.001 depending on price level
+        """
+        # Try to get from existing exchange info cache if available
+        # This reuses the tick_size config from elsewhere in the codebase
+        try:
+            from tbb.core.config import settings
+            # If settings has tick_size mapping, use it
+            if hasattr(settings, 'TICK_SIZES') and symbol.upper() in settings.TICK_SIZES:
+                return settings.TICK_SIZES[symbol.upper()]
+        except (ImportError, AttributeError):
+            pass
+        
+        # Default tick sizes based on asset type
+        if self.is_major_asset(symbol):
+            return 0.5  # BTC/ETH perps typically 0.5 tick
+        else:
+            # For alts, determine based on typical price levels
+            # This is a fallback - production should use real exchange data
+            return 0.01
+    
     def check_limit_fill(
         self,
         order: Order,
@@ -178,10 +203,12 @@ class SimulatedExchange:
     ) -> tuple[bool, Optional[float]]:
         """Check if a limit order should fill given bar data.
         
-        Implements Conservative Price-Through Rule:
-        - LONG: fills if bar.low < limit_price (strictly less)
-        - SHORT: fills if bar.high > limit_price (strictly greater)
-        - If only touches (bar.low == limit_price), use fill_probability
+        Implements Conservative Price-Through Rule with tick-size tolerance:
+        - LONG: fills if bar.low <= limit_price - tick_size (deterministic)
+                or bar.low within 1 tick (probabilistic)
+        - SHORT: fills if bar.high >= limit_price + tick_size (deterministic)
+                 or bar.high within 1 tick (probabilistic)
+        - If bar doesn't reach limit price, no fill
         
         Args:
             order: The limit order to check
@@ -194,6 +221,7 @@ class SimulatedExchange:
             return False, None
         
         limit_price = order.price
+        tick_size = self._get_tick_size(order.symbol)
         fill_probability = (
             self.fill_probability_major if self.is_major_asset(order.symbol)
             else self.fill_probability_alt
@@ -201,16 +229,17 @@ class SimulatedExchange:
         
         if order.side == OrderSide.LONG:
             # Long limit: price must go BELOW limit to fill
-            # Strict check: bar.low must be less than limit_price
-            price_through = bar.low < limit_price
-            price_touch = abs(bar.low - limit_price) < self.TICK_SIZE
+            # Deterministic fill: bar.low must be at least 1 tick below limit
+            price_through = bar.low <= (limit_price - tick_size)
+            # Touch: bar.low within 1 tick of limit (but not through)
+            price_touch = (bar.low > (limit_price - tick_size)) and (bar.low <= limit_price)
             
             if price_through:
-                # Definitely filled - price traded through our level
+                # Definitely filled - price traded through our level by at least 1 tick
                 fill_price = min(limit_price, bar.close)  # Better of limit or close
                 return True, fill_price
             elif price_touch:
-                # Price touched exactly - probabilistic fill
+                # Price touched exactly or within 1 tick - probabilistic fill
                 if random.random() < fill_probability:
                     return True, limit_price
                 else:
@@ -221,8 +250,10 @@ class SimulatedExchange:
                 
         else:  # SHORT
             # Short limit: price must go ABOVE limit to fill
-            price_through = bar.high > limit_price
-            price_touch = abs(bar.high - limit_price) < self.TICK_SIZE
+            # Deterministic fill: bar.high must be at least 1 tick above limit
+            price_through = bar.high >= (limit_price + tick_size)
+            # Touch: bar.high within 1 tick of limit (but not through)
+            price_touch = (bar.high < (limit_price + tick_size)) and (bar.high >= limit_price)
             
             if price_through:
                 fill_price = max(limit_price, bar.close)

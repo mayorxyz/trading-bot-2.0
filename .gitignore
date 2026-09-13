@@ -8,46 +8,42 @@ __pycache__/
 env/
 venv/
 .venv/
+.ENV
+.env
+.env.*
 .venv.bak/
-pip-log.txt
-pip-delete-this-directory.txt
-.tox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.log
-*.pot
-*.po
-*~
-.pytest_cache/
-.mypy_cache/
+.ENV.bak/
 
-# Build artifacts
-build/
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+.cover/
+
+# Build and distribution artifacts
 dist/
-*.egg
+build/
 *.egg-info/
-MANIFEST
+.installed.cfg
+*.egg
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Environment
-.env
-.env.local
-*.env.*
-
-# Testing
-htmlcov/
-.coverage*
+*~
 ```

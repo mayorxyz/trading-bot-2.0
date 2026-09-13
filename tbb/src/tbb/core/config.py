@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     SLIPPAGE_THRESHOLD: float = Field(default=0.30, description="Slippage threshold (30% worse than expected)")
     
     # === Signal Thresholds ===
-    MIN_CONFLUENCE_SCORE: float = Field(default=0.6, description="Minimum confluence score to enter (0.6)")
+    MIN_CONFLUENCE_SCORE: float = Field(default=0.40, description="Minimum confluence score to enter (0.40 for 0.70 max scale)")
     MIN_RISK_REWARD: float = Field(default=1.5, description="Minimum R:R ratio to enter (1.5)")
     FRESH_FVG_MAX_AGE_BARS_1H: int = Field(default=72, description="Max age for FVG on 1H (72 bars)")
     FRESH_FVG_MAX_AGE_BARS_15M: int = Field(default=48, description="Max age for FVG on 15m (48 bars)")

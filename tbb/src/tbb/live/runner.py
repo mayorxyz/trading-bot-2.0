@@ -33,21 +33,22 @@ from tbb.core.config import settings
 from tbb.core.logger import get_logger
 from tbb.data.websocket import BybitWebSocketManager
 from tbb.data.store import DataStore
-from tbb.indicators.structure import detect_bos, detect_choch, detect_swing_highs, detect_swing_lows
-from tbb.indicators.fvg import detect_fvgs, filter_fresh_fvgs, update_fvg_mitigation
-from tbb.indicators.order_block import detect_order_blocks, update_ob_touches
+from tbb.signals.market_structure import calculate_market_structure
+from tbb.signals.confluence import score_confluence
+from tbb.signals.generator import SignalGenerator, SignalResult
+from tbb.signals.output import publish_trade_signal, signal_output_manager, TradeSignal
+from tbb.tracking.store import SignalTrackingStore
 from tbb.indicators.regime import classify_regime, compute_adx, compute_hurst, compute_atr_percentile
 from tbb.indicators.volume import compute_delta, compute_cvd, compute_obi
 from tbb.indicators.funding import get_current_funding_rate, funding_pre_trade_check
-from tbb.signals.mvs import evaluate_mvs
-from tbb.signals.confluence import score_confluence
-from tbb.signals.output import publish_trade_signal, signal_output_manager, TradeSignal
 from tbb.risk.circuit_breaker import CircuitBreaker
 from tbb.risk.portfolio import PortfolioManager
 from tbb.risk.position_sizing import calculate_position_size
 from tbb.execution.order import OrderExecutor
+from tbb.execution.lifecycle_manager import LifecycleManager
 from tbb.monitoring.metrics import LiveMetrics
 from tbb.monitoring.drift import DriftDetector
+from tbb.monitoring.alerts import TelegramAlerter
 
 logger = get_logger(__name__)
 
@@ -68,6 +69,12 @@ class SymbolContext:
     last_4h_close: Optional[datetime] = None
     last_15m_close: Optional[datetime] = None
     active_signals: List[str] = field(default_factory=list)  # Signal IDs
+
+
+# Initialize new components
+signal_generator = SignalGenerator(config={})
+tracking_store = SignalTrackingStore()
+alerter = TelegramAlerter()
 
 
 @dataclass
@@ -102,6 +109,9 @@ class TradingBotRunner:
         self.portfolio_manager = PortfolioManager()
         self.order_executor = OrderExecutor() if settings.AUTO_EXECUTE else None
         self.drift_detector = DriftDetector()
+        self.signal_generator = SignalGenerator(config={})
+        self.tracking_store = SignalTrackingStore()
+        self.alerter = TelegramAlerter()
         
         # Macro event blacklist
         self.macro_events = MACRO_EVENTS
@@ -192,136 +202,48 @@ class TradingBotRunner:
                     logger.info(f"Macro event blackout, skipping signal generation for {symbol}")
                     continue
                 
-                # Run MVS evaluation
-                mvs_result = evaluate_mvs(ctx.htf_df, ctx.ltf_df, symbol)
+                # Calculate Market Structure (Swings, FVG, BOS/Sweep, OB)
+                ctx.ltf_df = calculate_market_structure(ctx.ltf_df, config={})
+                ctx.htf_df = calculate_market_structure(ctx.htf_df, config={})
                 
-                if not mvs_result.signal_valid:
-                    logger.debug(f"No valid MVS signal for {symbol}: {mvs_result.invalidation_reason}")
+                # Score Confluence on latest closed candle
+                confluence_result = score_confluence(ctx.ltf_df, config={})
+                
+                if confluence_result is None:
+                    logger.debug(f"No valid confluence signal for {symbol}")
                     continue
                 
-                # Run confluence scorer
-                confluence_score = score_confluence(
+                # Generate Signal
+                timestamp = datetime.now(timezone.utc)
+                signal_result = self.signal_generator.generate_signal(
+                    df=ctx.ltf_df,
+                    confluence_data=confluence_result,
                     symbol=symbol,
-                    htf_df=ctx.htf_df,
-                    ltf_df=ctx.ltf_df,
-                    ob=mvs_result.ob_present,
-                    fvg=mvs_result.fvg_confirmed,
-                    mss=mvs_result.mss_confirmed,
-                    cvd=ctx.cvd_value,
-                    obi=ctx.obi_value,
-                    funding=ctx.funding_rate,
-                    regime=ctx.regime,
+                    timestamp=timestamp
                 )
+                
+                if signal_result.signal is None:
+                    logger.debug(f"Signal generation failed for {symbol}: {signal_result.reason_rejected}")
+                    continue
+                
+                signal = signal_result.signal
+                
+                # Output Signal via Telegram/API
+                await self.alerter.send_signal_alert(signal)
+                
+                # Persist to Paper Tracker
+                await self.tracking_store.add_signal(signal)
                 
                 logger.info(
-                    f"MVS signal for {symbol}: score={confluence_score:.2f}, "
-                    f"entry={mvs_result.entry_price:.2f}, R:R={mvs_result.risk_reward:.2f}"
+                    f"Signal generated for {symbol}: "
+                    f"{signal.direction} @ {signal.entry_price}, "
+                    f"Score: {signal.confluence_score}"
                 )
                 
-                # Check minimum thresholds
-                if confluence_score < settings.MIN_CONFLUENCE_SCORE:
-                    logger.info(f"Confluence score {confluence_score:.2f} below threshold for {symbol}")
-                    continue
-                
-                if mvs_result.risk_reward < settings.MIN_RISK_REWARD:
-                    logger.info(f"R:R {mvs_result.risk_reward:.2f} below threshold for {symbol}")
-                    continue
-                
-                # Check circuit breaker
-                cb_result = self.circuit_breaker.check_all(LiveMetrics().compute([]))
-                if cb_result.triggered:
-                    logger.warning(f"Circuit breaker triggered: {cb_result.reason}")
-                    continue
-                
-                # Calculate position size
-                position_size_result = calculate_position_size(
-                    account_balance=10000.0,  # TODO: Get from config/exchange
-                    entry_price=mvs_result.entry_price,
-                    stop_price=mvs_result.stop_price,
-                    risk_pct=settings.ACCOUNT_RISK_PCT,
-                    leverage=settings.DEFAULT_LEVERAGE,
-                    funding_rate=ctx.funding_rate,
-                    confluence_score=confluence_score,
-                )
-                
-                # Check portfolio constraints
-                can_open, rejection_reason = self.portfolio_manager.can_open_position(
-                    symbol, position_size_result.risk_pct
-                )
-                if not can_open:
-                    logger.info(f"Portfolio constraint: {rejection_reason} for {symbol}")
-                    # Continue to publish signal even if portfolio blocks it
-                    # User can see the signal and manually override
-                
-                # PUBLISH SIGNAL (primary output)
-                max_age_bars = (
-                    settings.FRESH_FVG_MAX_AGE_BARS_15M
-                    if "15m" in settings.LTF_TIMEFRAME
-                    else settings.FRESH_FVG_MAX_AGE_BARS_1H
-                )
-                
-                signal = await publish_trade_signal(
-                    symbol=symbol,
-                    direction=mvs_result.direction,
-                    entry_price=mvs_result.entry_price,
-                    stop_loss=mvs_result.stop_price,
-                    take_profit_1=mvs_result.entry_price + (mvs_result.entry_price - mvs_result.stop_price),  # 1R
-                    take_profit_2=mvs_result.target_price,
-                    risk_reward=mvs_result.risk_reward,
-                    confluence_score=confluence_score,
-                    mvs_ob_present=mvs_result.ob_present,
-                    mvs_fvg_confirmed=mvs_result.fvg_confirmed,
-                    mvs_mss_confirmed=mvs_result.mss_confirmed,
-                    market_regime=ctx.regime or "UNKNOWN",
-                    adx_value=ctx.adx_value,
-                    hurst_value=ctx.hurst_value,
-                    funding_rate=ctx.funding_rate,
-                    atr_14=ctx.atr_value,
-                    cvd_divergence=False,  # TODO: Implement CVD divergence detection
-                    obi_value=ctx.obi_value,
-                    max_age_bars=max_age_bars,
-                    auto_execute=settings.AUTO_EXECUTE,
-                    position_size=position_size_result.quantity if can_open else None,
-                    notes=[rejection_reason] if not can_open else [],
-                )
-                
-                ctx.active_signals.append(signal.signal_id)
-                
-                # AUTO-EXECUTE (optional, only if AUTO_EXECUTE=true)
-                if settings.AUTO_EXECUTE and can_open:
-                    # Funding pre-trade check
-                    funding_check = funding_pre_trade_check(
-                        ctx.funding_rate,
-                        expected_hold_hours=24,  # TODO: Make configurable
-                    )
-                    if not funding_check.passed:
-                        logger.warning(f"Funding check failed for {symbol}: {funding_check.reason}")
-                        continue
-                    
-                    # Place limit order at FVG midpoint
-                    try:
-                        order_result = await self.order_executor.place_limit_order(
-                            symbol=symbol,
-                            side=mvs_result.direction,
-                            price=mvs_result.entry_price,
-                            size=position_size_result.quantity,
-                            leverage=settings.DEFAULT_LEVERAGE,
-                            reduce_only=False,
-                        )
-                        
-                        if order_result.success:
-                            logger.info(
-                                f"Order placed for {symbol}: {order_result.side} "
-                                f"{order_result.size} @ {order_result.fill_price}"
-                            )
-                        else:
-                            logger.warning(f"Order placement failed: {order_result.message}")
-                            
-                    except Exception as e:
-                        logger.error(f"Order execution error for {symbol}: {e}")
-                
-                # Update bars remaining for existing signals
-                await signal_output_manager.decrement_bars_remaining(symbol, "15m")
+                # AUTO-EXECUTE (optional, only if AUTO_EXECUTE=true and EXECUTION_MODE=live)
+                if settings.AUTO_EXECUTE and settings.EXECUTION_MODE == "live":
+                    manager = LifecycleManager()
+                    await manager.execute_signal(signal)
                 
             except asyncio.CancelledError:
                 logger.info(f"Symbol loop cancelled for {symbol}")

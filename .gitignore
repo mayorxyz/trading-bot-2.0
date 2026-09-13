@@ -1,1 +1,1 @@
-Nothing should be ignored since the changes only include source code files (.py) without any build artifacts, dependencies, or temporary files.
+Nothing should be ignored based on the provided file changes. The only modified file is a Python source file (`tbb/src/tbb/live/runner.py`), which should not be added to .gitignore.
